@@ -1,0 +1,14 @@
+{
+    "server": {
+        "ip": "127.0.0.1",
+        "port": 12345,
+        "log_file": "logs/packet_log.csv"
+    },
+    "client": {
+        "ip": "127.0.0.1",
+        "port": 12345,
+        "packet_size": 1024,
+        "send_interval": 100,
+        "log_file": "logs/rtt_log.csv"
+    }
+}
