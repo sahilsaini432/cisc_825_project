@@ -72,12 +72,6 @@ udp-rtt-measurement
    python src/client.py
    ```
 
-#### Android Client
-
-1. Open the Android project in Android Studio.
-2. Sync the project with Gradle files.
-3. Run the application on an Android device or emulator.
-
 ## Usage
 
 - The server listens for incoming UDP packets and logs their arrival times.
