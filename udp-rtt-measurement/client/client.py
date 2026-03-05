@@ -1,6 +1,8 @@
+import os
 import socket
 import time
 import csv
+from dotenv import load_dotenv
 
 
 class UDPClient:
@@ -24,7 +26,7 @@ class UDPClient:
             time.sleep(self.interval / 1000.0)
 
     def receive_response(self, t_first_sent):
-        self.sock.settimeout(1.0)
+        self.sock.settimeout(10.0)
         try:
             self.sock.recvfrom(65535)  # first downlink packet
             t_first_received = time.time()
@@ -41,10 +43,13 @@ class UDPClient:
 
 
 if __name__ == "__main__":
-    SERVER_IP = "127.0.0.1"  # Replace with the server's IP address
-    SERVER_PORT = 12345  # Replace with the server's port
+    load_dotenv()
+    SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
+    print(f"Using server IP: {SERVER_IP}")
+    SERVER_PORT = 5000  # Replace with the server's port
     PACKET_SIZE = 1024  # Size of the packet train
     INTERVAL = 100  # Interval in milliseconds
+    U = 10  # Number of packets in the train
 
     client = UDPClient(SERVER_IP, SERVER_PORT, PACKET_SIZE, INTERVAL)
-    client.send_packets()
+    client.send_packets(U)
