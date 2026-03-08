@@ -4,6 +4,7 @@ import csv
 import os
 import signal
 import select
+import time
 from datetime import datetime
 
 HOST = "0.0.0.0"  # Server IP address
@@ -11,20 +12,60 @@ PORT = 5000  # Server port
 D = 10  # number of downlink packets
 DOWNLINK_PACKET_SIZE = 1024  # Size of the downlink packet
 
+# Per-client train state: addr -> list of arrival timestamps
+uplink_trains = {}
 
-async def handle_client(data, addr, server_socket: socket.socket):
-    log_packet(len(data), addr)
-    downlink_packet = b"Y" * DOWNLINK_PACKET_SIZE
-    loop = asyncio.get_event_loop()
-    for _ in range(D):
-        await loop.run_in_executor(None, server_socket.sendto, downlink_packet, addr)
+# Heavy client log: addr -> list of arrival timestamps
+heavy_arrivals = {}
 
 
-def log_packet(packet_size, source_address):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-    with open(log_file, mode="a", newline="") as file:
+async def handle_packet(data, addr, server_socket: socket.socket):
+    arrival_time = time.time()
+    marker = data[0:1]
+
+    if marker == b"@":
+        # First packet in an uplink train — start a new train
+        if addr in uplink_trains and uplink_trains[addr]:
+            log_uplink_train(addr, uplink_trains[addr])
+        uplink_trains[addr] = [arrival_time]
+
+        # Send D downlink packets
+        first_packet = b"@" * DOWNLINK_PACKET_SIZE
+        downlink_packet = b"Y" * DOWNLINK_PACKET_SIZE
+        loop = asyncio.get_event_loop()
+        for i in range(D):
+            pkt = first_packet if i == 0 else downlink_packet
+            await loop.run_in_executor(None, server_socket.sendto, pkt, addr)
+
+    elif marker == b"X":
+        # Subsequent packet in an uplink train
+        if addr in uplink_trains:
+            uplink_trains[addr].append(arrival_time)
+
+    elif marker == b"#":
+        # Heavy/saturator client packet
+        if addr not in heavy_arrivals:
+            heavy_arrivals[addr] = []
+        heavy_arrivals[addr].append(arrival_time)
+
+    else:
+        print(f"Unknown packet marker from {addr}: {marker}")
+
+
+def log_uplink_train(addr, arrivals):
+    """Log a completed uplink train's arrival times."""
+    with open(uplink_log_file, mode="a", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow([timestamp, packet_size, source_address])
+        writer.writerow([addr[0], addr[1]] + arrivals)
+
+
+def flush_heavy_logs():
+    """Write out all heavy client arrival logs."""
+    with open(heavy_log_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        for addr, arrivals in heavy_arrivals.items():
+            writer.writerow([addr[0], addr[1]] + arrivals)
+    heavy_arrivals.clear()
 
 
 def receive_with_select(server_socket, stop_event):
@@ -45,7 +86,7 @@ async def main():
     stop_event = asyncio.Event()
     import threading
 
-    thread_stop = threading.Event()  # thread-safe stop flag for executor thread
+    thread_stop = threading.Event()
 
     def shutdown():
         print("\nShutting down server...")
@@ -62,7 +103,13 @@ async def main():
         data, addr = await loop.run_in_executor(None, receive_with_select, server_socket, thread_stop)
         if data is not None:
             print(f"Received {len(data)} bytes from {addr}")
-            asyncio.create_task(handle_client(data, addr, server_socket))
+            asyncio.create_task(handle_packet(data, addr, server_socket))
+
+    # Flush any remaining train/heavy logs before exiting
+    for addr, arrivals in uplink_trains.items():
+        if arrivals:
+            log_uplink_train(addr, arrivals)
+    flush_heavy_logs()
 
     server_socket.close()
     print("Server stopped.")
@@ -70,10 +117,8 @@ async def main():
 
 if __name__ == "__main__":
     os.makedirs("logs", exist_ok=True)
-    log_file = "logs/packet_log.csv"
-    if not os.path.isfile(log_file):
-        with open(log_file, mode="w", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow(["Timestamp", "Packet Size", "Source Address"])
+
+    uplink_log_file = "logs/uplink_train_log.csv"
+    heavy_log_file = "logs/heavy_log.csv"
 
     asyncio.run(main())
