@@ -84,6 +84,10 @@ async def handle_packet(data: bytes, addr, server_socket: socket.socket):
         # ── Heavy / saturator packet ──
         heavy_arrivals.append(arrival_time)
 
+        # Send one # packet back so saturator can log downlink heavy PDOs
+        response = b"#" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
+        await loop.run_in_executor(None, server_socket.sendto, response, addr)
+
     else:
         print(f"[WARN] Unknown marker {marker} from {addr}")
 
