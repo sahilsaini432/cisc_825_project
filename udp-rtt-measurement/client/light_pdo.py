@@ -131,7 +131,7 @@ class UDPClient:
     # Main recording loop
     # ──────────────────────────────────────────────
 
-    def record(self):
+    def record(self, duration_sec):
         """
         Run the packet train probing workload for the full recording session.
         Sends one train every G ms (self.interval).
@@ -143,7 +143,7 @@ class UDPClient:
         train_count = 0
 
         try:
-            while True:
+            while time.time() - self.recording_start_time < duration_sec:
                 t_train_start = time.time()
 
                 # 1. Send uplink train
@@ -164,6 +164,7 @@ class UDPClient:
         except KeyboardInterrupt:
             print(f"\nRecording stopped after {train_count} trains.")
             print(f"Trace saved → {self.down_light_pdo_file}")
+        print(f"Recording complete — 60s window finished.")
 
 
 if __name__ == "__main__":
@@ -177,6 +178,7 @@ if __name__ == "__main__":
     D = 75  # Downlink packets per train (server sends these back)
     G = 50  # Gap between trains (ms)
     PACKET_SIZE = 1400  # MTU-sized packets
+    DURATION = 60
 
     client = UDPClient(server_ip=SERVER_IP, server_port=5000, packet_size=PACKET_SIZE, interval=G, U=U, D=D)
-    client.record()
+    client.record(DURATION)
