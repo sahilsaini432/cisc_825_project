@@ -1,77 +1,155 @@
 import socket
 import asyncio
-import csv
 import os
 import signal
 import select
 import time
-from datetime import datetime
 
-HOST = "0.0.0.0"  # Server IP address
-PORT = 5000  # Server port
-D = 10  # number of downlink packets
-DOWNLINK_PACKET_SIZE = 1024  # Size of the downlink packet
+HOST = "0.0.0.0"
+PORT = 5000
+D = 10  # Number of downlink packets to send back
+DOWNLINK_PACKET_SIZE = 1400  # MTU-sized packets (matching paper)
 
-# Per-client train state: addr -> list of arrival timestamps
+# Per-client train state: addr -> list of absolute arrival times (float seconds)
 uplink_trains = {}
 
-# Heavy client log: addr -> list of arrival timestamps
-heavy_arrivals = {}
+# Heavy PDO arrivals: list of absolute arrival times
+heavy_arrivals = []
+
+# Set when first packet ever arrives — all times are relative to this
+recording_start_time = None
 
 
-async def handle_packet(data, addr, server_socket: socket.socket):
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
+
+
+def ms_since_start(t: float) -> float:
+    """Absolute time → ms relative to recording start."""
+    return round((t - recording_start_time) * 1000, 3)
+
+
+def compute_pdos(arrivals: list) -> list:
+    """
+    Convert absolute arrival times of one train into relative PDOs (ms).
+    First value is always 0.0 (first packet is the reference).
+    e.g. [1.000, 1.003, 1.005] → [0.0, 3.0, 5.0]
+    """
+    t0 = arrivals[0]
+    return [round((t - t0) * 1000, 3) for t in arrivals]
+
+
+# ──────────────────────────────────────────────
+# Packet handler
+# ──────────────────────────────────────────────
+
+
+async def handle_packet(data: bytes, addr, server_socket: socket.socket):
+    global recording_start_time
+
     arrival_time = time.time()
+
+    # Set recording start on very first packet
+    if recording_start_time is None:
+        recording_start_time = arrival_time
+        print(f"Recording started at {recording_start_time:.3f}")
+
     marker = data[0:1]
 
     if marker == b"@":
-        # First packet in an uplink train — start a new train
+        # ── First packet of a NEW uplink train ──
+        # Flush the previous completed train (if any) before starting new one
         if addr in uplink_trains and uplink_trains[addr]:
-            log_uplink_train(addr, uplink_trains[addr])
+            flush_uplink_train(uplink_trains[addr])
+
+        # Start fresh train with this packet's arrival time
         uplink_trains[addr] = [arrival_time]
 
-        # Send D downlink packets
-        first_packet = b"@" * DOWNLINK_PACKET_SIZE
-        downlink_packet = b"Y" * DOWNLINK_PACKET_SIZE
+        # Respond with D downlink packets (first marked "@", rest "Y")
+        # Client uses the "@" marker to identify start of downlink train
+        first_pkt = b"@" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
+        other_pkt = b"Y" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
         loop = asyncio.get_event_loop()
         for i in range(D):
-            pkt = first_packet if i == 0 else downlink_packet
+            pkt = first_pkt if i == 0 else other_pkt
             await loop.run_in_executor(None, server_socket.sendto, pkt, addr)
 
     elif marker == b"X":
-        # Subsequent packet in an uplink train
+        # ── Subsequent packet in the current uplink train ──
         if addr in uplink_trains:
             uplink_trains[addr].append(arrival_time)
 
     elif marker == b"#":
-        # Heavy/saturator client packet
-        if addr not in heavy_arrivals:
-            heavy_arrivals[addr] = []
-        heavy_arrivals[addr].append(arrival_time)
+        # ── Heavy / saturator packet ──
+        heavy_arrivals.append(arrival_time)
 
     else:
-        print(f"Unknown packet marker from {addr}: {marker}")
+        print(f"[WARN] Unknown marker {marker} from {addr}")
 
 
-def log_uplink_train(addr, arrivals):
-    """Log a completed uplink train's arrival times."""
-    with open(uplink_log_file, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow([addr[0], addr[1]] + arrivals)
+# ──────────────────────────────────────────────
+# Trace writers
+# ──────────────────────────────────────────────
 
 
-def flush_heavy_logs():
-    """Write out all heavy client arrival logs."""
-    with open(heavy_log_file, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        for addr, arrivals in heavy_arrivals.items():
-            writer.writerow([addr[0], addr[1]] + arrivals)
+def flush_uplink_train(arrivals: list):
+    """
+    Write ONE completed train to the uplink light PDO trace file.
+
+    Output format (one line per train):
+        time_ms   0.0   pdo_1   pdo_2   ...   pdo_{U-1}
+
+    - time_ms   : arrival time of train's first packet, relative to recording start (ms)
+    - 0.0       : PDO of first packet is always 0 (it's the reference)
+    - pdo_i     : arrival_time[i] - arrival_time[0], in ms
+
+    Example line:
+        0.0     0.0   3.2   5.1
+        50.4    0.0   2.8   4.9   6.1
+    """
+    time_ms = ms_since_start(arrivals[0])
+    pdos = compute_pdos(arrivals)  # [0.0, 3.2, 5.1, ...]
+
+    with open(uplink_light_pdo_file, "a") as f:
+        pdo_str = "   ".join(f"{round(p)}" for p in pdos)
+        f.write(f"{round(time_ms)}   {pdo_str}\n")
+
+
+def flush_heavy_pdos():
+    """
+    Write all heavy PDO arrivals to file.
+
+    Output format (one line per packet):
+        timestamp_ms
+
+    - timestamp_ms : arrival time relative to recording start (ms)
+    - These are NOT grouped into trains — it's a continuous saturated stream
+
+    Example:
+        0.0
+        1.2
+        2.5
+        3.7
+        ...
+    """
+    if not heavy_arrivals:
+        return
+    with open(uplink_heavy_pdo_file, "a") as f:
+        for t in heavy_arrivals:
+            f.write(f"{ms_since_start(t):.3f}\n")
     heavy_arrivals.clear()
 
 
-def receive_with_select(server_socket, stop_event):
-    """Use select to wait for data without blocking forever."""
-    while not stop_event.is_set():
-        ready = select.select([server_socket], [], [], 1.0)  # 1s timeout
+# ──────────────────────────────────────────────
+# Main loop
+# ──────────────────────────────────────────────
+
+
+def receive_with_select(server_socket, thread_stop):
+    """Non-blocking receive with 1s timeout so shutdown works cleanly."""
+    while not thread_stop.is_set():
+        ready = select.select([server_socket], [], [], 1.0)
         if ready[0]:
             return server_socket.recvfrom(65535)
     return None, None
@@ -89,7 +167,7 @@ async def main():
     thread_stop = threading.Event()
 
     def shutdown():
-        print("\nShutting down server...")
+        print("\nShutting down — flushing remaining logs...")
         thread_stop.set()
         stop_event.set()
 
@@ -97,28 +175,30 @@ async def main():
     loop.add_signal_handler(signal.SIGTERM, shutdown)
 
     print(f"Server listening on {HOST}:{PORT}")
-    print("Press Ctrl+C to stop the server.")
+    print("Waiting for packets... (Ctrl+C to stop)")
 
     while not stop_event.is_set():
         data, addr = await loop.run_in_executor(None, receive_with_select, server_socket, thread_stop)
         if data is not None:
-            print(f"Received {len(data)} bytes from {addr}")
             asyncio.create_task(handle_packet(data, addr, server_socket))
 
-    # Flush any remaining train/heavy logs before exiting
+    # ── Graceful shutdown: flush everything ──
     for addr, arrivals in uplink_trains.items():
         if arrivals:
-            log_uplink_train(addr, arrivals)
-    flush_heavy_logs()
+            flush_uplink_train(arrivals)
+    flush_heavy_pdos()
 
     server_socket.close()
     print("Server stopped.")
+    print(f"  Light PDO trace → {uplink_light_pdo_file}")
+    print(f"  Heavy PDO trace → {uplink_heavy_pdo_file}")
 
 
 if __name__ == "__main__":
     os.makedirs("logs", exist_ok=True)
 
-    uplink_log_file = "logs/uplink_train_log.csv"
-    heavy_log_file = "logs/heavy_log.csv"
+    # Output files (server only handles uplink side)
+    uplink_light_pdo_file = "logs/up-delay-light-pdo.txt"  # time + PDOs per train
+    uplink_heavy_pdo_file = "logs/up-heavy-pdo.txt"  # continuous heavy arrivals
 
     asyncio.run(main())
