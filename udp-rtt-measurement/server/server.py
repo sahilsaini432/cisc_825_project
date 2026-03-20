@@ -7,7 +7,7 @@ import time
 
 HOST = "0.0.0.0"
 PORT = 5000
-D = 10  # Number of downlink packets to send back
+D = 75  # Number of downlink packets to send back
 DOWNLINK_PACKET_SIZE = 1400  # MTU-sized packets (matching paper)
 
 # Per-client train state: addr -> list of absolute arrival times (float seconds)
@@ -49,6 +49,7 @@ async def handle_packet(data: bytes, addr, server_socket: socket.socket):
     global recording_start_time
 
     arrival_time = time.time()
+    loop = asyncio.get_event_loop()
 
     # Set recording start on very first packet
     if recording_start_time is None:
@@ -65,24 +66,27 @@ async def handle_packet(data: bytes, addr, server_socket: socket.socket):
 
         # Start fresh train with this packet's arrival time
         uplink_trains[addr] = [arrival_time]
+        print(f"[RX] @ (train start) from {addr}")
 
         # Respond with D downlink packets (first marked "@", rest "Y")
         # Client uses the "@" marker to identify start of downlink train
         first_pkt = b"@" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
         other_pkt = b"Y" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
-        loop = asyncio.get_event_loop()
         for i in range(D):
             pkt = first_pkt if i == 0 else other_pkt
             await loop.run_in_executor(None, server_socket.sendto, pkt, addr)
+        print(f"[TX] Sent {D} downlink packets to {addr}")
 
     elif marker == b"X":
         # ── Subsequent packet in the current uplink train ──
         if addr in uplink_trains:
             uplink_trains[addr].append(arrival_time)
+            print(f"[RX] X (train pkt #{len(uplink_trains[addr])}) from {addr}")
 
     elif marker == b"#":
         # ── Heavy / saturator packet ──
         heavy_arrivals.append(arrival_time)
+        print(f"[RX] # (heavy pkt #{len(heavy_arrivals)}) from {addr}")
 
         # Send one # packet back so saturator can log downlink heavy PDOs
         response = b"#" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
@@ -141,7 +145,7 @@ def flush_heavy_pdos():
         return
     with open(uplink_heavy_pdo_file, "a") as f:
         for t in heavy_arrivals:
-            f.write(f"{ms_since_start(t):.3f}\n")
+            f.write(f"{round(ms_since_start(t))}\n")
     heavy_arrivals.clear()
 
 
