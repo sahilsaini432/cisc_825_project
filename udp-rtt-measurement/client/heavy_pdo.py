@@ -47,15 +47,21 @@ def receive_heavy(sock):
     print("[RECEIVER] Listening for downlink heavy packets...")
     sock.settimeout(1.0)
 
+    pkt_count = 0
     with open(down_heavy_pdo_file, "a") as f:
         while not stop_flag.is_set():
             try:
-                data, _ = sock.recvfrom(65535)
+                data, addr = sock.recvfrom(65535)
+                print(f"[RECEIVER] Got packet from {addr}, len={len(data)}, first_byte={data[0:1]!r}")
                 if data[0:1] == b"#":
                     arrival_time = time.time()
                     ts_ms = ms_since_start(arrival_time)
+                    pkt_count += 1
+                    print(f"[RECEIVER] Heavy packet #{pkt_count} accepted, ts={ts_ms}ms")
                     f.write(f"{ts_ms}\n")
                     f.flush()
+                else:
+                    print(f"[RECEIVER] Packet ignored (unexpected first byte: {data[0:1]!r})")
             except socket.timeout:
                 continue
             except Exception as e:
