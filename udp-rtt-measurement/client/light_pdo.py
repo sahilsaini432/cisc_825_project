@@ -58,24 +58,19 @@ class UDPClient:
         return t_first_sent
 
     def receive_downlink_train(self):
-        """
-        Receive D downlink packets from server.
-        Server marks first packet '@' so we can identify it.
-        Returns list of absolute arrival times.
-        """
-        self.sock.settimeout(10.0)  # Long timeout for first packet
+        self.sock.settimeout(10.0)  # first packet — can afford to wait longer
         downlink_arrivals = []
 
         try:
-            # Wait for first downlink packet (marked '@')
+            # Wait for first downlink packet
             while True:
                 data, _ = self.sock.recvfrom(65535)
                 if data[0:1] == b"@":
                     downlink_arrivals.append(time.time())
                     break
 
-            # Receive remaining D-1 packets with shorter timeout
-            self.sock.settimeout(2.0)
+            # ← Reduce to 50ms — all D packets arrive back-to-back
+            self.sock.settimeout(0.05)
             while len(downlink_arrivals) < self.D:
                 try:
                     self.sock.recvfrom(65535)
