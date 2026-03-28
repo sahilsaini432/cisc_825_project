@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
 CellReplay benchmark client.
-Runs RTT, packet train, and file download tests matching paper methodology.
-Saves results to JSON for plotting.
+Works with the updated server.py (no echo_server.py needed).
+
+All test traffic goes to:
+  UDP port 5000  — RTT probe (marker 'R') + variable train (marker 'T')
+  TCP port 5001  — file download
 
 Usage:
   # Baseline (no emulation):
   python3 run_tests.py --server 192.168.1.100 --label baseline
 
-  # Under tc netem emulation:
+  # Under netem emulation (run netem_replay.py in another terminal first):
   python3 run_tests.py --server 192.168.1.100 --label netem
 
-  # Results saved to: results_<label>.json
+  # Skip individual tests:
+  python3 run_tests.py --server 192.168.1.100 --label baseline --skip-rtt
+  python3 run_tests.py --server 192.168.1.100 --label baseline --skip-train
+  python3 run_tests.py --server 192.168.1.100 --label baseline --skip-download
 """
 
 import socket
@@ -20,139 +26,107 @@ import time
 import json
 import argparse
 import random
-import os
 
-UDP_ECHO_PORT = 5001
-UDP_TRAIN_PORT = 5002
-TCP_FILE_PORT = 5003
+UDP_PORT = 5000
+TCP_PORT = 5001
 PKT_SIZE = 1400
 
-# Match paper exactly
-RTT_INTERVAL_MS = 50  # send RTT probe every 50ms
-RTT_DURATION_S = 60  # 60 second test
+RTT_INTERVAL_MS = 50
+RTT_DURATION_S = 60
 TRAIN_SIZES = [1, 10, 25, 50, 75, 100, 150, 200]
-TRAIN_GAP_MS = 100  # 100ms gap between trains
-TRAINS_PER_SIZE = 30  # repeat each train size 30 times
+TRAIN_GAP_MS = 100
+TRAINS_PER_SIZE = 30
 FILE_SIZES_KB = [1, 10, 50, 100, 250]
 DOWNLOADS_PER_SIZE = 20
 
 
-# ── RTT Test ──────────────────────────────────────────────────────────────────
-
-
 def run_rtt_test(server_ip, duration_s=RTT_DURATION_S):
-    """Send 1400-byte UDP packets every 50ms, measure round-trip time."""
-    print(f"\n[RTT test] {duration_s}s, packet every {RTT_INTERVAL_MS}ms...")
+    """Send 'R' packets every 50ms, server echoes back, measure RTT."""
+    print(f"\n[RTT test] {duration_s}s, one packet every {RTT_INTERVAL_MS}ms...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.5)
-    payload = b"R" * (PKT_SIZE - 8)
-
+    payload_size = PKT_SIZE - 13
     rtts = []
     seq = 0
     deadline = time.time() + duration_s
 
     while time.time() < deadline:
         send_ts = time.time()
-        pkt = struct.pack("!Id", seq, send_ts) + payload
+        pkt = b"R" + struct.pack("!Id", seq, send_ts) + b"\x00" * payload_size
         try:
-            sock.sendto(pkt, (server_ip, UDP_ECHO_PORT))
-            data, _ = sock.recvfrom(4096)
+            sock.sendto(pkt, (server_ip, UDP_PORT))
+            data, _ = sock.recvfrom(PKT_SIZE + 64)
             recv_ts = time.time()
-            rtt_ms = (recv_ts - send_ts) * 1000
-            rtts.append(rtt_ms)
+            if data[0:1] == b"R":
+                rtts.append((recv_ts - send_ts) * 1000)
         except socket.timeout:
-            pass  # packet lost
-
+            pass
         seq += 1
-        elapsed = time.time() - send_ts
-        sleep_s = max(0, RTT_INTERVAL_MS / 1000 - elapsed)
-        time.sleep(sleep_s)
+        time.sleep(max(0, RTT_INTERVAL_MS / 1000 - (time.time() - send_ts)))
 
     sock.close()
-    print(f"  Collected {len(rtts)} RTT samples")
-    print(f"  Median RTT: {sorted(rtts)[len(rtts)//2]:.1f} ms")
+    if rtts:
+        s = sorted(rtts)
+        print(f"  {len(rtts)} samples  median={s[len(s)//2]:.1f}ms  " f"min={s[0]:.1f}ms  max={s[-1]:.1f}ms")
+    else:
+        print("  WARNING: no samples — is server.py running?")
     return rtts
 
 
-# ── Train Test ────────────────────────────────────────────────────────────────
-
-
 def run_train_test(server_ip):
-    """
-    For each train size N, send a request to server → server sends N packets back.
-    Measure: relative arrival times per packet, and train completion time (TCT).
-    Matches paper §3.2 exactly.
-    """
+    """Send 'T'+N to server, receive N packets back, measure TCT."""
     print(f"\n[Train test] sizes={TRAIN_SIZES}, {TRAINS_PER_SIZE} repeats each...")
-
     results = {n: {"tct_ms": [], "rel_arrivals": []} for n in TRAIN_SIZES}
 
-    # Randomize order like the paper
     order = []
     for n in TRAIN_SIZES:
         order.extend([n] * TRAINS_PER_SIZE)
     random.shuffle(order)
 
-    recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    recv_sock.bind(("0.0.0.0", 0))
-    recv_sock.settimeout(0.5)
-    my_port = recv_sock.getsockname()[1]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", 0))
+    completed = 0
 
-    req_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    train_id = 0
     for n in order:
-        # Send train request
-        req = struct.pack("!II", train_id, n)
-        req_sock.sendto(req, (server_ip, UDP_TRAIN_PORT))
+        req = b"T" + struct.pack("!H", n)
         send_ts = time.time()
+        sock.sendto(req, (server_ip, UDP_PORT))
 
-        # Receive packets
-        arrivals = {}
-        deadline = time.time() + 2.0  # 2s timeout for whole train
+        arrivals = []
+        sock.settimeout(0.05)
+        deadline = time.time() + max(0.5, n * 0.01 + 0.3)
+
         while len(arrivals) < n and time.time() < deadline:
             try:
-                data, _ = recv_sock.recvfrom(4096)
-                recv_ts = time.time()
-                if len(data) < 16:
-                    continue
-                tid, seq, _ = struct.unpack("!IIQ", data[:16])
-                if tid == train_id:
-                    arrivals[seq] = recv_ts
+                data, _ = sock.recvfrom(PKT_SIZE + 64)
+                if data[0:1] == b"T":
+                    arrivals.append(time.time())
             except socket.timeout:
-                break
+                continue
 
         if len(arrivals) == n:
             t0 = arrivals[0]
-            rel = [(arrivals[i] - t0) * 1000 for i in range(n)]
+            rel = [(t - t0) * 1000 for t in arrivals]
+            tct = (arrivals[-1] - send_ts) * 1000
             results[n]["rel_arrivals"].append(rel)
+            results[n]["tct_ms"].append(tct)
+            completed += 1
 
-            # TCT: time from send to receiving last packet
-            tct_ms = (arrivals[n - 1] - send_ts) * 1000
-            results[n]["tct_ms"].append(tct_ms)
-
-        train_id += 1
         time.sleep(TRAIN_GAP_MS / 1000)
 
-    recv_sock.close()
-    req_sock.close()
-
+    sock.close()
+    print(f"  Completed {completed}/{len(order)} trains")
     for n in TRAIN_SIZES:
         tcts = results[n]["tct_ms"]
         if tcts:
-            print(f"  N={n:3d}: mean TCT={sum(tcts)/len(tcts):.1f}ms  ({len(tcts)} trains)")
-
+            print(f"  N={n:3d}: mean TCT={sum(tcts)/len(tcts):.1f}ms  ({len(tcts)})")
+        else:
+            print(f"  N={n:3d}: no data")
     return results
 
 
-# ── File Download Test ────────────────────────────────────────────────────────
-
-
 def run_download_test(server_ip):
-    """
-    Download files of varying sizes over TCP.
-    Matches paper §5.6: randomized order, measure turnaround time.
-    """
+    """TCP connect to port 5001, send 4-byte size, receive data, measure time."""
     print(f"\n[Download test] sizes={FILE_SIZES_KB}KB, {DOWNLOADS_PER_SIZE} each...")
     results = {kb: [] for kb in FILE_SIZES_KB}
 
@@ -165,12 +139,10 @@ def run_download_test(server_ip):
         size_bytes = kb * 1024
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)
-            sock.connect((server_ip, TCP_FILE_PORT))
-
+            sock.settimeout(15)
+            sock.connect((server_ip, TCP_PORT))
             t0 = time.time()
             sock.sendall(struct.pack("!I", size_bytes))
-
             received = 0
             while received < size_bytes:
                 chunk = sock.recv(65536)
@@ -178,55 +150,51 @@ def run_download_test(server_ip):
                     break
                 received += len(chunk)
             t1 = time.time()
-
             sock.close()
-            dl_ms = (t1 - t0) * 1000
-            results[kb].append(dl_ms)
-            time.sleep(0.05)  # 50ms between downloads like paper
+            if received == size_bytes:
+                results[kb].append((t1 - t0) * 1000)
+            time.sleep(0.05)
         except Exception as e:
-            print(f"  [warn] {kb}KB download failed: {e}")
+            print(f"  [warn] {kb}KB: {e}")
 
     for kb in FILE_SIZES_KB:
         times = results[kb]
         if times:
-            print(f"  {kb:4d}KB: mean={sum(times)/len(times):.1f}ms  ({len(times)} downloads)")
-
+            print(f"  {kb:4d}KB: mean={sum(times)/len(times):.1f}ms  ({len(times)})")
+        else:
+            print(f"  {kb:4d}KB: no data")
     return results
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--server", required=True, help="Server IP address")
-    parser.add_argument("--label", required=True, help="Label for this run (e.g. baseline, netem)")
+    parser.add_argument("--server", required=True)
+    parser.add_argument("--label", required=True)
     parser.add_argument("--skip-rtt", action="store_true")
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-download", action="store_true")
     parser.add_argument("--rtt-duration", type=int, default=RTT_DURATION_S)
     args = parser.parse_args()
 
+    print(f"\nBenchmark → {args.server}  label={args.label}")
+    print(f"  UDP {UDP_PORT} (RTT+train)   TCP {TCP_PORT} (download)\n")
+
     results = {"label": args.label, "server": args.server, "timestamp": time.time()}
 
     if not args.skip_rtt:
         results["rtt_ms"] = run_rtt_test(args.server, args.rtt_duration)
-
     if not args.skip_train:
-        train_results = run_train_test(args.server)
-        # Convert to serializable format
+        tr = run_train_test(args.server)
         results["train"] = {
-            str(n): {"tct_ms": v["tct_ms"], "rel_arrivals": v["rel_arrivals"]}
-            for n, v in train_results.items()
+            str(n): {"tct_ms": v["tct_ms"], "rel_arrivals": v["rel_arrivals"]} for n, v in tr.items()
         }
-
     if not args.skip_download:
         results["download_ms"] = {str(kb): times for kb, times in run_download_test(args.server).items()}
 
-    out_file = f"results_{args.label}.json"
-    with open(out_file, "w") as f:
+    out = f"results_{args.label}.json"
+    with open(out, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\nResults saved to {out_file}")
+    print(f"\nSaved → {out}")
 
 
 if __name__ == "__main__":

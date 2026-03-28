@@ -1,22 +1,42 @@
+#!/usr/bin/env python3
+"""
+CellReplay server — handles both recording AND benchmark test traffic.
+
+UDP Port 5000:
+  '@' = first packet of uplink train    → respond with D=75 downlink packets
+  'X' = subsequent uplink train packets → log arrival time
+  '#' = heavy/saturator packet          → echo one '#' back
+  'R' = RTT probe                       → echo straight back
+  'T' = variable train request          → send N packets back (N in bytes 1-2)
+
+TCP Port 5001:
+  File download server:
+    client sends 4 bytes (big-endian uint32) = requested size in bytes
+    server responds with exactly that many bytes
+
+Recording output (logs/):
+  up-delay-light-pdo.txt  — uplink light PDOs (one line per train)
+  up-heavy-pdo.txt        — uplink heavy PDOs (one timestamp per packet)
+"""
+
 import socket
 import asyncio
 import os
 import signal
 import select
 import time
+import threading
+import struct
 
 HOST = "0.0.0.0"
-PORT = 5000
-D = 75  # Number of downlink packets to send back
-DOWNLINK_PACKET_SIZE = 1400  # MTU-sized packets (matching paper)
+UDP_PORT = 5000
+TCP_PORT = 5001
+D = 75  # Number of downlink packets to send back per light train
+DOWNLINK_PACKET_SIZE = 1400
 
-# Per-client train state: addr -> list of absolute arrival times (float seconds)
+# Recording state
 uplink_trains = {}
-
-# Heavy PDO arrivals: list of absolute arrival times
 heavy_arrivals = []
-
-# Set when first packet ever arrives — all times are relative to this
 recording_start_time = None
 
 
@@ -26,74 +46,12 @@ recording_start_time = None
 
 
 def ms_since_start(t: float) -> float:
-    """Absolute time → ms relative to recording start."""
     return round((t - recording_start_time) * 1000, 3)
 
 
 def compute_pdos(arrivals: list) -> list:
-    """
-    Convert absolute arrival times of one train into relative PDOs (ms).
-    First value is always 0.0 (first packet is the reference).
-    e.g. [1.000, 1.003, 1.005] → [0.0, 3.0, 5.0]
-    """
     t0 = arrivals[0]
     return [round((t - t0) * 1000, 3) for t in arrivals]
-
-
-# ──────────────────────────────────────────────
-# Packet handler
-# ──────────────────────────────────────────────
-
-
-async def handle_packet(data: bytes, addr, server_socket: socket.socket):
-    global recording_start_time
-
-    arrival_time = time.time()
-    loop = asyncio.get_event_loop()
-
-    # Set recording start on very first packet
-    if recording_start_time is None:
-        recording_start_time = arrival_time
-        print(f"Recording started at {recording_start_time:.3f}")
-
-    marker = data[0:1]
-
-    if marker == b"@":
-        # ── First packet of a NEW uplink train ──
-        # Flush the previous completed train (if any) before starting new one
-        if addr in uplink_trains and uplink_trains[addr]:
-            flush_uplink_train(uplink_trains[addr])
-
-        # Start fresh train with this packet's arrival time
-        uplink_trains[addr] = [arrival_time]
-        print(f"[RX] @ (train start) from {addr}")
-
-        # Respond with D downlink packets (first marked "@", rest "Y")
-        # Client uses the "@" marker to identify start of downlink train
-        first_pkt = b"@" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
-        other_pkt = b"Y" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
-        for i in range(D):
-            pkt = first_pkt if i == 0 else other_pkt
-            await loop.run_in_executor(None, server_socket.sendto, pkt, addr)
-        print(f"[TX] Sent {D} downlink packets to {addr}")
-
-    elif marker == b"X":
-        # ── Subsequent packet in the current uplink train ──
-        if addr in uplink_trains:
-            uplink_trains[addr].append(arrival_time)
-            print(f"[RX] X (train pkt #{len(uplink_trains[addr])}) from {addr}")
-
-    elif marker == b"#":
-        # ── Heavy / saturator packet ──
-        heavy_arrivals.append(arrival_time)
-        print(f"[RX] # (heavy pkt #{len(heavy_arrivals)}) from {addr}")
-
-        # Send one # packet back so saturator can log downlink heavy PDOs
-        response = b"#" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
-        await loop.run_in_executor(None, server_socket.sendto, response, addr)
-
-    else:
-        print(f"[WARN] Unknown marker {marker} from {addr}")
 
 
 # ──────────────────────────────────────────────
@@ -102,45 +60,14 @@ async def handle_packet(data: bytes, addr, server_socket: socket.socket):
 
 
 def flush_uplink_train(arrivals: list):
-    """
-    Write ONE completed train to the uplink light PDO trace file.
-
-    Output format (one line per train):
-        time_ms   0.0   pdo_1   pdo_2   ...   pdo_{U-1}
-
-    - time_ms   : arrival time of train's first packet, relative to recording start (ms)
-    - 0.0       : PDO of first packet is always 0 (it's the reference)
-    - pdo_i     : arrival_time[i] - arrival_time[0], in ms
-
-    Example line:
-        0.0     0.0   3.2   5.1
-        50.4    0.0   2.8   4.9   6.1
-    """
     time_ms = ms_since_start(arrivals[0])
-    pdos = compute_pdos(arrivals)  # [0.0, 3.2, 5.1, ...]
-
+    pdos = compute_pdos(arrivals)
     with open(uplink_light_pdo_file, "a") as f:
         pdo_str = "   ".join(f"{round(p)}" for p in pdos)
         f.write(f"{round(time_ms)}   {pdo_str}\n")
 
 
 def flush_heavy_pdos():
-    """
-    Write all heavy PDO arrivals to file.
-
-    Output format (one line per packet):
-        timestamp_ms
-
-    - timestamp_ms : arrival time relative to recording start (ms)
-    - These are NOT grouped into trains — it's a continuous saturated stream
-
-    Example:
-        0.0
-        1.2
-        2.5
-        3.7
-        ...
-    """
     if not heavy_arrivals:
         return
     with open(uplink_heavy_pdo_file, "a") as f:
@@ -150,12 +77,117 @@ def flush_heavy_pdos():
 
 
 # ──────────────────────────────────────────────
-# Main loop
+# UDP packet handler
+# ──────────────────────────────────────────────
+
+
+async def handle_packet(data: bytes, addr, sock: socket.socket):
+    global recording_start_time
+
+    arrival_time = time.time()
+    loop = asyncio.get_event_loop()
+
+    if recording_start_time is None:
+        recording_start_time = arrival_time
+        print(f"Recording started at {recording_start_time:.3f}")
+
+    marker = data[0:1]
+
+    if marker == b"@":
+        # ── Light train: first packet ──
+        if addr in uplink_trains and uplink_trains[addr]:
+            flush_uplink_train(uplink_trains[addr])
+        uplink_trains[addr] = [arrival_time]
+        print(f"[RX] @ (train start) from {addr}")
+
+        first_pkt = b"@" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
+        other_pkt = b"Y" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
+        for i in range(D):
+            pkt = first_pkt if i == 0 else other_pkt
+            await loop.run_in_executor(None, sock.sendto, pkt, addr)
+        print(f"[TX] Sent {D} downlink packets to {addr}")
+
+    elif marker == b"X":
+        # ── Light train: subsequent packets ──
+        if addr in uplink_trains:
+            uplink_trains[addr].append(arrival_time)
+
+    elif marker == b"#":
+        # ── Heavy saturator packet ──
+        heavy_arrivals.append(arrival_time)
+        response = b"#" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
+        await loop.run_in_executor(None, sock.sendto, response, addr)
+
+    elif marker == b"R":
+        # ── RTT probe: echo straight back ──
+        await loop.run_in_executor(None, sock.sendto, data, addr)
+
+    elif marker == b"T":
+        # ── Variable train request for benchmark test ──
+        # Bytes 1-2: train size N (big-endian uint16)
+        if len(data) < 3:
+            return
+        n = struct.unpack("!H", data[1:3])[0]
+        n = max(1, min(n, 500))  # clamp to sane range
+        print(f"[RX] T (train request N={n}) from {addr}")
+        pkt = b"T" + b"\x00" * (DOWNLINK_PACKET_SIZE - 1)
+        for _ in range(n):
+            await loop.run_in_executor(None, sock.sendto, pkt, addr)
+
+    else:
+        print(f"[WARN] Unknown marker {marker} from {addr}")
+
+
+# ──────────────────────────────────────────────
+# TCP file download server
+# ──────────────────────────────────────────────
+
+
+def tcp_file_server():
+    """
+    Client sends 4-byte big-endian uint32 = number of bytes to download.
+    Server responds with exactly that many bytes then closes connection.
+    """
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((HOST, TCP_PORT))
+    srv.listen(32)
+    print(f"[file]  TCP download server listening on :{TCP_PORT}")
+
+    def handle(conn, addr):
+        try:
+            raw = b""
+            while len(raw) < 4:
+                chunk = conn.recv(4 - len(raw))
+                if not chunk:
+                    return
+                raw += chunk
+            size = struct.unpack("!I", raw)[0]
+            sent = 0
+            chunk = b"A" * 65536
+            while sent < size:
+                to_send = min(len(chunk), size - sent)
+                conn.sendall(chunk[:to_send])
+                sent += to_send
+        except Exception as e:
+            print(f"[file] error: {e}")
+        finally:
+            conn.close()
+
+    while True:
+        try:
+            conn, addr = srv.accept()
+            threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
+        except Exception:
+            break
+
+
+# ──────────────────────────────────────────────
+# Main UDP loop
 # ──────────────────────────────────────────────
 
 
 def receive_with_select(server_socket, thread_stop):
-    """Non-blocking receive with 1s timeout so shutdown works cleanly."""
     while not thread_stop.is_set():
         ready = select.select([server_socket], [], [], 1.0)
         if ready[0]:
@@ -166,13 +198,15 @@ def receive_with_select(server_socket, thread_stop):
 async def main():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((HOST, PORT))
+    server_socket.bind((HOST, UDP_PORT))
 
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
-    import threading
-
     thread_stop = threading.Event()
+
+    # Start TCP file server in background thread
+    tcp_thread = threading.Thread(target=tcp_file_server, daemon=True)
+    tcp_thread.start()
 
     def shutdown():
         print("\nShutting down — flushing remaining logs...")
@@ -182,15 +216,16 @@ async def main():
     loop.add_signal_handler(signal.SIGINT, shutdown)
     loop.add_signal_handler(signal.SIGTERM, shutdown)
 
-    print(f"Server listening on {HOST}:{PORT}")
-    print("Waiting for packets... (Ctrl+C to stop)")
+    print(f"Server listening on UDP :{UDP_PORT} and TCP :{TCP_PORT}")
+    print(f"Markers: @ X (light train)  # (heavy)  R (RTT echo)  T (variable train)")
+    print("Waiting for packets... (Ctrl+C to stop)\n")
 
     while not stop_event.is_set():
         data, addr = await loop.run_in_executor(None, receive_with_select, server_socket, thread_stop)
         if data is not None:
             asyncio.create_task(handle_packet(data, addr, server_socket))
 
-    # ── Graceful shutdown: flush everything ──
+    # Flush on shutdown
     for addr, arrivals in uplink_trains.items():
         if arrivals:
             flush_uplink_train(arrivals)
@@ -204,9 +239,6 @@ async def main():
 
 if __name__ == "__main__":
     os.makedirs("logs", exist_ok=True)
-
-    # Output files (server only handles uplink side)
-    uplink_light_pdo_file = "logs/up-delay-light-pdo.txt"  # time + PDOs per train
-    uplink_heavy_pdo_file = "logs/up-heavy-pdo.txt"  # continuous heavy arrivals
-
+    uplink_light_pdo_file = "logs/up-delay-light-pdo.txt"
+    uplink_heavy_pdo_file = "logs/up-heavy-pdo.txt"
     asyncio.run(main())
