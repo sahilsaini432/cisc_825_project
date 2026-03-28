@@ -10,8 +10,9 @@ UDP Port 5000:
   'T' = variable train request          → send N packets back (N in bytes 1-2)
 
 TCP Port 5001:
-  File download:  client sends b'D' + 4-byte uint32 size → server sends that many bytes
-  File upload:    client sends b'U' + 4-byte uint32 size → client sends data → server acks with b'OK'
+  File download server:
+    client sends 4 bytes (big-endian uint32) = requested size in bytes
+    server responds with exactly that many bytes
 
 Recording output (logs/):
   up-delay-light-pdo.txt  — uplink light PDOs (one line per train)
@@ -138,62 +139,38 @@ async def handle_packet(data: bytes, addr, sock: socket.socket):
 
 
 # ──────────────────────────────────────────────
-# TCP file server (download + upload)
+# TCP file download server
 # ──────────────────────────────────────────────
 
 
 def tcp_file_server():
     """
-    Protocol (first byte selects mode):
-      b'D' + 4-byte uint32 size  → download: server sends `size` bytes then closes
-      b'U' + 4-byte uint32 size  → upload:   client sends `size` bytes, server acks b'OK'
+    Client sends 4-byte big-endian uint32 = number of bytes to download.
+    Server responds with exactly that many bytes then closes connection.
     """
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((HOST, TCP_PORT))
     srv.listen(32)
-    print(f"[file]  TCP server listening on :{TCP_PORT}  (D=download  U=upload)")
+    print(f"[file]  TCP download server listening on :{TCP_PORT}")
 
     def handle(conn, addr):
         try:
-            conn.settimeout(30)
-
-            # Read command byte + 4-byte size (5 bytes total)
-            header = b""
-            while len(header) < 5:
-                chunk = conn.recv(5 - len(header))
+            raw = b""
+            while len(raw) < 4:
+                chunk = conn.recv(4 - len(raw))
                 if not chunk:
                     return
-                header += chunk
-
-            cmd = header[0:1]
-            size = struct.unpack("!I", header[1:5])[0]
-
-            if cmd == b"D":
-                # ── Download: send `size` bytes ──
-                sent = 0
-                payload = b"A" * 65536
-                while sent < size:
-                    to_send = min(len(payload), size - sent)
-                    conn.sendall(payload[:to_send])
-                    sent += to_send
-
-            elif cmd == b"U":
-                # ── Upload: receive `size` bytes, then ack ──
-                received = 0
-                while received < size:
-                    chunk = conn.recv(min(65536, size - received))
-                    if not chunk:
-                        break
-                    received += len(chunk)
-                if received == size:
-                    conn.sendall(b"OK")
-
-            else:
-                print(f"[file] unknown command byte {cmd!r} from {addr}")
-
+                raw += chunk
+            size = struct.unpack("!I", raw)[0]
+            sent = 0
+            chunk = b"A" * 65536
+            while sent < size:
+                to_send = min(len(chunk), size - sent)
+                conn.sendall(chunk[:to_send])
+                sent += to_send
         except Exception as e:
-            print(f"[file] error from {addr}: {e}")
+            print(f"[file] error: {e}")
         finally:
             conn.close()
 
