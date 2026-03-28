@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import statistics
 import numpy as np
 import matplotlib
@@ -26,6 +27,34 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+
+# ── Paper data ─────────────────────────────────────────────────────────────────
+# Import from paper_data.py (must be in the same directory or on PYTHONPATH).
+# paper_data.py contains digitized values from CellReplay NSDI '25,
+# Figures 10, 11, 12, 13, 14 (T-Mobile + Verizon, stationary).
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+
+from paper_data import fig10_rtt_cdf, fig10_tct, fig12_download  # noqa: E402
+
+# Map paper_data structures → names used by the plot functions below.
+# All three use T-Mobile / stationary ("good") conditions to match the paper's
+# primary evaluation environment (§5.4, §5.6).
+OPERATOR = "T-Mobile"
+
+PAPER_RTT_CDF = fig10_rtt_cdf[OPERATOR]  # {"Live": [...], "CellReplay": [...], "Mahimahi": [...]}
+
+PAPER_TCT = {  # values as np.arrays for arithmetic convenience
+    name: np.array(vals) for name, vals in fig10_tct[OPERATOR].items()
+}
+PAPER_TCT_SIZES = fig10_tct["train_sizes"]  # [1, 10, 25, 50, 75, 100, 150, 200]
+
+PAPER_DL_SIZES = fig12_download["file_sizes_kb"]  # [1, 10, 50, 100, 150, 200, 250]
+PAPER_DL = {name: np.array(fig12_download[OPERATOR][name]) for name in ["Live", "CellReplay", "Mahimahi"]}
+PAPER_DL_CI = {
+    name: np.array(fig12_download[OPERATOR][f"{name}_ci"]) for name in ["Live", "CellReplay", "Mahimahi"]
+}
 
 # ── Style ──────────────────────────────────────────────────────────────────────
 plt.rcParams.update(
@@ -67,79 +96,6 @@ YOUR_MARKER = {
 
 TRAIN_SIZES = [1, 10, 25, 50, 75, 100, 150, 200]
 FILE_SIZES_KB = [1, 10, 50, 100, 250]
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Paper digitized data  (T-Mobile, stationary, "good" conditions)
-# Source: Figures 10 & 12, CellReplay NSDI '25
-# Accuracy: ±1–2 ms for figure-read values; % numbers are exact from text.
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Fig 10 top — RTT CDF: list of (rtt_ms, cdf) tuples
-PAPER_RTT_CDF = {
-    "Live": [
-        (30, 0.00),
-        (35, 0.02),
-        (40, 0.08),
-        (45, 0.18),
-        (50, 0.34),
-        (55, 0.50),
-        (60, 0.64),
-        (65, 0.76),
-        (70, 0.85),
-        (75, 0.92),
-        (80, 0.96),
-        (85, 0.98),
-        (90, 1.00),
-    ],
-    "CellReplay": [
-        (30, 0.00),
-        (35, 0.02),
-        (40, 0.09),
-        (45, 0.20),
-        (50, 0.36),
-        (55, 0.52),
-        (60, 0.65),
-        (65, 0.77),
-        (70, 0.86),
-        (75, 0.93),
-        (80, 0.97),
-        (90, 1.00),
-    ],
-    "Mahimahi": [
-        (27, 0.00),
-        (30, 0.02),
-        (34, 0.08),
-        (38, 0.20),
-        (42, 0.38),
-        (46, 0.55),
-        (50, 0.70),
-        (54, 0.82),
-        (58, 0.90),
-        (63, 0.96),
-        (70, 1.00),
-    ],
-}
-
-# Fig 10 bottom — TCT vs train size (ms)
-PAPER_TCT = {
-    #                      1    10   25   50   75  100  150  200
-    "Live": np.array([42, 46, 50, 57, 65, 72, 79, 86]),
-    "CellReplay": np.array([42, 46, 50, 57, 64, 70, 77, 83]),
-    "Mahimahi": np.array([41, 44, 47, 51, 54, 57, 59, 62]),
-}
-
-# Fig 12 — Download time (ms) + 95% CI half-widths
-PAPER_DL_SIZES = [1, 10, 50, 100, 150, 200, 250]
-PAPER_DL = {
-    "Live": np.array([46, 48, 53, 58, 63, 68, 73]),
-    "CellReplay": np.array([46, 48, 52, 57, 62, 66, 72]),
-    "Mahimahi": np.array([41, 42, 44, 47, 50, 52, 55]),
-}
-PAPER_DL_CI = {
-    "Live": np.array([2, 2, 3, 4, 5, 5, 6]),
-    "CellReplay": np.array([2, 2, 3, 4, 4, 5, 6]),
-    "Mahimahi": np.array([1, 1, 2, 2, 3, 3, 4]),
-}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Loader
@@ -274,7 +230,7 @@ def plot_tct(results, out_path):
     # Paper lines (dashed)
     for name, vals in PAPER_TCT.items():
         ax.plot(
-            TRAIN_SIZES,
+            PAPER_TCT_SIZES,
             vals,
             color=PAPER_COLOR[name],
             linestyle="--",
