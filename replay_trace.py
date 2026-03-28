@@ -77,15 +77,26 @@ def parse_delay_light(path):
 
 
 def compute_bw_schedule(timestamps, window_ms):
+    """O(n) linear scan instead of O(n²) nested loop."""
     t_start = timestamps[0]
     t_end = timestamps[-1]
     schedule = []
+
+    i = 0
+    n = len(timestamps)
     t = t_start
+
     while t < t_end:
-        count = sum(1 for ts in timestamps if t <= ts < t + window_ms)
+        window_end = t + window_ms
+        count = 0
+        # advance pointer while timestamp falls in this window
+        while i < n and timestamps[i] < window_end:
+            count += 1
+            i += 1
         kbps = max(MIN_RATE_KBPS, (count * BYTES_PER_PKT * 8) / window_ms)
         schedule.append((t - t_start, int(kbps)))
-        t += window_ms
+        t = window_end
+
     return schedule
 
 
@@ -101,9 +112,10 @@ def run(cmd, check=True):
 
 
 def netem_delay_str(delay_ms, use_dist, jitter_ms=None, dist_file=None):
-    """Build the delay portion of a netem tc command."""
     if use_dist and dist_file and jitter_ms:
-        return f"delay {delay_ms}ms {jitter_ms}ms distribution {dist_file}"
+        # tc only accepts the bare filename, no path, no .dist extension
+        dist_name = os.path.basename(dist_file).replace(".dist", "")
+        return f"delay {delay_ms}ms {jitter_ms}ms distribution {dist_name}"
     else:
         return f"delay {delay_ms}ms"
 
@@ -177,12 +189,12 @@ def main():
 
     # ── Resolve trace files from directory ──
     d = args.trace_dir
-    up_light = os.path.join(d, "up-delay-light-pdo.txt")
-    down_light = os.path.join(d, "down-delay-light-pdo.txt")
-    up_heavy = os.path.join(d, "up-heavy-pdo.txt")
-    down_heavy = os.path.join(d, "down-heavy-pdo.txt")
-    up_dist = os.path.join(d, "up_delay.dist")
-    down_dist = os.path.join(d, "down_delay.dist")
+    up_light = os.path.join(d, "up-delay-light-pdo")
+    down_light = os.path.join(d, "down-delay-light-pdo")
+    up_heavy = os.path.join(d, "up-heavy-pdo")
+    down_heavy = os.path.join(d, "down-heavy-pdo")
+    up_dist = os.path.abspath(os.path.join(d, "up_delay"))
+    down_dist = os.path.abspath(os.path.join(d, "down_delay"))
     for p in (up_light, down_light, up_heavy, down_heavy):
         if not os.path.isfile(p):
             print(f"ERROR: expected file not found: {p}")
