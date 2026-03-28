@@ -36,6 +36,7 @@ def send_heavy(sock, server_ip):
 
     while not stop_flag.is_set():
         sock.sendto(pkt, (server_ip, SERVER_PORT))
+        time.sleep(0.0001)
 
 
 # ──────────────────────────────────────────────
