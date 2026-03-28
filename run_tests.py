@@ -5,7 +5,7 @@ Works with the updated server.py (no echo_server.py needed).
 
 All test traffic goes to:
   UDP port 5000  — RTT probe (marker 'R') + variable train (marker 'T')
-  TCP port 5001  — file download
+  TCP port 5001  — file download (cmd 'D') + file upload (cmd 'U')
 
 Usage:
   # Baseline (no emulation):
@@ -18,6 +18,7 @@ Usage:
   python3 run_tests.py --server 192.168.1.100 --label baseline --skip-rtt
   python3 run_tests.py --server 192.168.1.100 --label baseline --skip-train
   python3 run_tests.py --server 192.168.1.100 --label baseline --skip-download
+  python3 run_tests.py --server 192.168.1.100 --label baseline --skip-upload
 """
 
 import socket
@@ -38,6 +39,7 @@ TRAIN_GAP_MS = 100
 TRAINS_PER_SIZE = 30
 FILE_SIZES_KB = [1, 10, 50, 100, 250]
 DOWNLOADS_PER_SIZE = 20
+UPLOADS_PER_SIZE = 20
 
 
 def run_rtt_test(server_ip, duration_s=RTT_DURATION_S):
@@ -126,7 +128,7 @@ def run_train_test(server_ip):
 
 
 def run_download_test(server_ip):
-    """TCP connect to port 5001, send 4-byte size, receive data, measure time."""
+    """TCP connect to port 5001, send 'D'+4-byte size, receive data, measure time."""
     print(f"\n[Download test] sizes={FILE_SIZES_KB}KB, {DOWNLOADS_PER_SIZE} each...")
     results = {kb: [] for kb in FILE_SIZES_KB}
 
@@ -142,7 +144,8 @@ def run_download_test(server_ip):
             sock.settimeout(15)
             sock.connect((server_ip, TCP_PORT))
             t0 = time.time()
-            sock.sendall(struct.pack("!I", size_bytes))
+            # Command byte 'D' + 4-byte size
+            sock.sendall(b"D" + struct.pack("!I", size_bytes))
             received = 0
             while received < size_bytes:
                 chunk = sock.recv(65536)
@@ -155,7 +158,60 @@ def run_download_test(server_ip):
                 results[kb].append((t1 - t0) * 1000)
             time.sleep(0.05)
         except Exception as e:
-            print(f"  [warn] {kb}KB: {e}")
+            print(f"  [warn] {kb}KB download: {e}")
+
+    for kb in FILE_SIZES_KB:
+        times = results[kb]
+        if times:
+            print(f"  {kb:4d}KB: mean={sum(times)/len(times):.1f}ms  ({len(times)})")
+        else:
+            print(f"  {kb:4d}KB: no data")
+    return results
+
+
+def run_upload_test(server_ip):
+    """TCP connect to port 5001, send 'U'+4-byte size, upload data, wait for 'OK' ack."""
+    print(f"\n[Upload test] sizes={FILE_SIZES_KB}KB, {UPLOADS_PER_SIZE} each...")
+    results = {kb: [] for kb in FILE_SIZES_KB}
+
+    order = []
+    for kb in FILE_SIZES_KB:
+        order.extend([kb] * UPLOADS_PER_SIZE)
+    random.shuffle(order)
+
+    # Pre-generate payload to avoid allocation overhead during timing
+    payload = b"B" * 65536
+
+    for kb in order:
+        size_bytes = kb * 1024
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(30)
+            sock.connect((server_ip, TCP_PORT))
+            t0 = time.time()
+            # Command byte 'U' + 4-byte size
+            sock.sendall(b"U" + struct.pack("!I", size_bytes))
+            sent = 0
+            while sent < size_bytes:
+                to_send = min(len(payload), size_bytes - sent)
+                sock.sendall(payload[:to_send])
+                sent += to_send
+            # Wait for server ack
+            ack = b""
+            while len(ack) < 2:
+                chunk = sock.recv(2 - len(ack))
+                if not chunk:
+                    break
+                ack += chunk
+            t1 = time.time()
+            sock.close()
+            if ack == b"OK":
+                results[kb].append((t1 - t0) * 1000)
+            else:
+                print(f"  [warn] {kb}KB upload: bad ack {ack!r}")
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"  [warn] {kb}KB upload: {e}")
 
     for kb in FILE_SIZES_KB:
         times = results[kb]
@@ -173,11 +229,12 @@ def main():
     parser.add_argument("--skip-rtt", action="store_true")
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-download", action="store_true")
+    parser.add_argument("--skip-upload", action="store_true")
     parser.add_argument("--rtt-duration", type=int, default=RTT_DURATION_S)
     args = parser.parse_args()
 
     print(f"\nBenchmark → {args.server}  label={args.label}")
-    print(f"  UDP {UDP_PORT} (RTT+train)   TCP {TCP_PORT} (download)\n")
+    print(f"  UDP {UDP_PORT} (RTT+train)   TCP {TCP_PORT} (download+upload)\n")
 
     results = {"label": args.label, "server": args.server, "timestamp": time.time()}
 
@@ -189,7 +246,13 @@ def main():
             str(n): {"tct_ms": v["tct_ms"], "rel_arrivals": v["rel_arrivals"]} for n, v in tr.items()
         }
     if not args.skip_download:
-        results["download_ms"] = {str(kb): times for kb, times in run_download_test(args.server).items()}
+        results["download_ms"] = {
+            str(kb): times for kb, times in run_download_test(server_ip=args.server).items()
+        }
+    if not args.skip_upload:
+        results["upload_ms"] = {
+            str(kb): times for kb, times in run_upload_test(server_ip=args.server).items()
+        }
 
     out = f"results_{args.label}.json"
     with open(out, "w") as f:
