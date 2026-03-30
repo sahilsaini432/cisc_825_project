@@ -76,19 +76,16 @@ PAPER_COLOR = {
 }
 # Your lines: solid, vivid
 YOUR_COLOR = {
-    "baseline": "#d62728",  # red
     "netem_50ms": "#ff7f0e",  # orange
     "netem_500ms": "#8c564b",  # brown
     "netem_dist": "#e377c2",  # pink
 }
 YOUR_LABEL = {
-    "baseline": "Yours — Ethernet baseline",
-    "netem_50ms": "Yours — netem 50 ms idle",
-    "netem_500ms": "Yours — netem 500 ms idle",
-    "netem_dist": "Yours — netem + dist",
+    "netem_50ms": "netem 50 ms idle",
+    "netem_500ms": "netem 500 ms idle",
+    "netem_dist": "netem + dist",
 }
 YOUR_MARKER = {
-    "baseline": "o",
     "netem_50ms": "s",
     "netem_500ms": "^",
     "netem_dist": "D",
@@ -102,7 +99,6 @@ FILE_SIZES_KB = [1, 10, 50, 100, 250]
 # ══════════════════════════════════════════════════════════════════════════════
 
 RESULT_FILES = {
-    "baseline": "results_baseline.json",
     "netem_50ms": "results_netem_50ms.json",
     "netem_500ms": "results_netem_500ms.json",
     "netem_dist": "results_netem_dist.json",
@@ -151,9 +147,7 @@ def plot_rtt_cdf(results, out_path):
     # Paper lines (dashed)
     for name, pts in PAPER_RTT_CDF.items():
         xs, ys = zip(*pts)
-        ax.plot(
-            xs, ys, color=PAPER_COLOR[name], linestyle="--", linewidth=1.8, label=f"Paper: {name} (T-Mobile)"
-        )
+        ax.plot(xs, ys, color=PAPER_COLOR[name], linestyle="--", linewidth=1.8, label=f" {name} (T-Mobile)")
 
     # Your lines (solid)
     for key, d in results.items():
@@ -163,7 +157,7 @@ def plot_rtt_cdf(results, out_path):
 
     ax.set_xlabel("Packet RTT (ms)")
     ax.set_ylabel("CDF")
-    ax.set_title("Fig 1 — RTT CDF\n(paper Fig 10 top)")
+    ax.set_title("Fig 1 — RTT CDF")
     ax.set_ylim(0, 1)
     ax.set_xlim(0, 250)
     ax.set_yticks(np.arange(0, 1.1, 0.2))
@@ -237,7 +231,7 @@ def plot_tct(results, out_path):
             marker="^",
             markersize=5,
             linewidth=1.8,
-            label=f"Paper: {name} (T-Mobile)",
+            label=f" {name} (T-Mobile)",
         )
 
     # Your lines (solid)
@@ -261,7 +255,7 @@ def plot_tct(results, out_path):
 
     ax.set_xlabel("Train size (packets)")
     ax.set_ylabel("Mean TCT (ms)")
-    ax.set_title("Fig 2 — Train Completion Time vs Train Size\n(paper Fig 10 bottom)")
+    ax.set_title("Fig 2 — Train Completion Time vs Train Size")
     ax.legend(fontsize=7.5, loc="upper left")
     ax.grid(True, alpha=0.3)
 
@@ -318,7 +312,7 @@ def plot_download(results, out_path):
             marker="^",
             markersize=5,
             linewidth=1.8,
-            label=f"Paper: {name} (T-Mobile)",
+            label=f" {name} (T-Mobile)",
         )
         ax.fill_between(PAPER_DL_SIZES, vals - ci, vals + ci, color=PAPER_COLOR[name], alpha=0.10)
 
@@ -352,7 +346,7 @@ def plot_download(results, out_path):
 
     ax.set_xlabel("File size (KB)")
     ax.set_ylabel("Mean download time (ms)")
-    ax.set_title("Fig 3 — File Download Time vs File Size\n(paper Fig 12, T-Mobile)")
+    ax.set_title("Fig 3 — File Download Time vs File Size")
     ax.legend(fontsize=7.5, loc="upper left")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -408,22 +402,8 @@ def plot_rel_arrivals(results, out_path):
         ax.legend(fontsize=7.5)
         ax.grid(True, alpha=0.3)
 
-        # Annotate what to expect from real cellular
-        ax.text(
-            0.97,
-            0.05,
-            "Real cellular would show\nsteps/clusters here",
-            transform=ax.transAxes,
-            fontsize=7.5,
-            ha="right",
-            va="bottom",
-            color="gray",
-            bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", alpha=0.8),
-        )
-
     fig.suptitle(
-        "Fig 4 — Relative Packet Arrival Times Within a Train\n"
-        "(paper Fig 5 style — shows bursty delivery pattern)",
+        "Fig 4 — Relative Packet Arrival Times Within a Train",
         y=1.02,
     )
     plt.tight_layout()
