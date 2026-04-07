@@ -157,7 +157,6 @@ def plot_rtt_cdf(results, out_path):
 
     ax.set_xlabel("Packet RTT (ms)")
     ax.set_ylabel("CDF")
-    ax.set_title("Fig 1 — RTT CDF")
     ax.set_ylim(0, 1)
     ax.set_xlim(0, 250)
     ax.set_yticks(np.arange(0, 1.1, 0.2))
@@ -255,7 +254,6 @@ def plot_tct(results, out_path):
 
     ax.set_xlabel("Train size (packets)")
     ax.set_ylabel("Mean TCT (ms)")
-    ax.set_title("Fig 2 — Train Completion Time vs Train Size")
     ax.legend(fontsize=7.5, loc="upper left")
     ax.grid(True, alpha=0.3)
 
@@ -346,7 +344,6 @@ def plot_download(results, out_path):
 
     ax.set_xlabel("File size (KB)")
     ax.set_ylabel("Mean download time (ms)")
-    ax.set_title("Fig 3 — File Download Time vs File Size")
     ax.legend(fontsize=7.5, loc="upper left")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -402,10 +399,6 @@ def plot_rel_arrivals(results, out_path):
         ax.legend(fontsize=7.5)
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle(
-        "Fig 4 — Relative Packet Arrival Times Within a Train",
-        y=1.02,
-    )
     plt.tight_layout()
     plt.savefig(out_path, bbox_inches="tight", dpi=720)
     plt.close()
